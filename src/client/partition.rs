@@ -113,6 +113,20 @@ struct CurrentBroker {
     gen_leader_from_self: Option<MetadataCacheGeneration>,
 }
 
+/// The result of the [fetch_records](PartitionClient::fetch_records) call.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct FetchResult {
+    /// The offsets of the fetched records.
+    pub records: Vec<RecordAndOffset>,
+
+    /// The high watermark of the partition.
+    pub high_watermark: i64,
+
+    /// The size of the response encoded in bytes.
+    pub encoded_response_size: usize,
+}
+
 /// Many operations must be performed on the leader for a partition
 ///
 /// Additionally a partition is the unit of concurrency within Kafka
@@ -221,6 +235,7 @@ impl PartitionClient {
                 let ResponseBodyWithMetadata {
                     response,
                     encoded_request_size,
+                    ..
                 } = broker
                     .request(&request)
                     .await
@@ -251,10 +266,10 @@ impl PartitionClient {
         offset: i64,
         bytes: Range<i32>,
         max_wait_ms: i32,
-    ) -> Result<(Vec<RecordAndOffset>, i64)> {
+    ) -> Result<FetchResult> {
         let request = &build_fetch_request(offset, bytes, max_wait_ms, self.partition, &self.topic);
 
-        let partition = maybe_retry(
+        let (partition, response_size) = maybe_retry(
             &self.backoff_config,
             self.unknown_topic_handling,
             self,
@@ -264,13 +279,17 @@ impl PartitionClient {
                     .get()
                     .await
                     .map_err(|e| ErrorOrThrottle::Error((e, None)))?;
-                let response = broker
+                let ResponseBodyWithMetadata {
+                    response,
+                    encoded_response_size,
+                    ..
+                } = broker
                     .request(&request)
                     .await
-                    .map_err(|e| ErrorOrThrottle::Error((e.into(), Some(r#gen))))?
-                    .response;
+                    .map_err(|e| ErrorOrThrottle::Error((e.into(), Some(r#gen))))?;
                 maybe_throttle(response.throttle_time_ms)?;
                 process_fetch_response(self.partition, &self.topic, response, offset)
+                    .map(|r| (r, encoded_response_size))
                     .map_err(|e| ErrorOrThrottle::Error((e, Some(r#gen))))
             },
         )
@@ -278,7 +297,11 @@ impl PartitionClient {
 
         let records = extract_records(partition.records.0, offset)?;
 
-        Ok((records, partition.high_watermark.0))
+        Ok(FetchResult {
+            records,
+            high_watermark: partition.high_watermark.0,
+            encoded_response_size: response_size,
+        })
     }
 
     /// Get offset for this partition.

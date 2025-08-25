@@ -439,7 +439,7 @@ async fn consume_rskafka(
             .fetch_records(offset, 0..1_000_000, 1_000)
             .await
             .unwrap()
-            .0;
+            .records;
         assert!(!res.is_empty());
         for record in res {
             offset = offset.max(record.offset);

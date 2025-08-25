@@ -405,6 +405,7 @@ where
         cleanup_on_cancel.message_sent();
 
         let mut response = rx.await.expect("Who closed this channel?!")?;
+        let response_size = response.data.get_ref().len();
         let body = R::ResponseBody::read_versioned(&mut response.data, body_api_version)?;
 
         // check if we fully consumed the message, otherwise there might be a bug in our protocol code
@@ -422,6 +423,7 @@ where
         Ok(ResponseBodyWithMetadata {
             response: body,
             encoded_request_size: encoded_size,
+            encoded_response_size: response_size,
         })
     }
 

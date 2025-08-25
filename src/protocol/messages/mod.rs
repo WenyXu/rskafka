@@ -94,6 +94,9 @@ pub struct ResponseBodyWithMetadata<R> {
 
     /// The size of the request encoded in bytes.
     pub encoded_request_size: usize,
+
+    /// The size of the response encoded in bytes.
+    pub encoded_response_size: usize,
 }
 
 /// Specifies a request body.

@@ -172,7 +172,7 @@ trait FetchClient: std::fmt::Debug + Send + Sync {
         offset: i64,
         bytes: Range<i32>,
         max_wait_ms: i32,
-    ) -> BoxFuture<'_, Result<(Vec<RecordAndOffset>, i64)>>;
+    ) -> BoxFuture<'_, Result<crate::client::partition::FetchResult>>;
 
     /// Get offset.
     ///
@@ -186,7 +186,7 @@ impl FetchClient for PartitionClient {
         offset: i64,
         bytes: Range<i32>,
         max_wait_ms: i32,
-    ) -> BoxFuture<'_, Result<(Vec<RecordAndOffset>, i64)>> {
+    ) -> BoxFuture<'_, Result<crate::client::partition::FetchResult>> {
         Box::pin(self.fetch_records(offset, bytes, max_wait_ms))
     }
 
@@ -268,8 +268,11 @@ impl Stream for StreamConsumer {
                         },
                     };
 
-                    let (records_and_offsets, watermark) =
-                        client.fetch_records(offset, bytes, max_wait_ms).await?;
+                    let crate::client::partition::FetchResult {
+                        records: records_and_offsets,
+                        high_watermark: watermark,
+                        ..
+                    } = client.fetch_records(offset, bytes, max_wait_ms).await?;
                     Ok(FetchResultOk {
                         records_and_offsets,
                         watermark,
@@ -368,6 +371,7 @@ mod tests {
     use futures::{StreamExt, pin_mut};
     use tokio::sync::{Mutex, mpsc};
 
+    use crate::client::partition::FetchResult;
     use crate::{
         client::error::{Error, ProtocolError, RequestContext},
         record::Record,
@@ -413,7 +417,7 @@ mod tests {
             start_offset: i64,
             bytes: Range<i32>,
             max_wait_ms: i32,
-        ) -> BoxFuture<'_, Result<(Vec<RecordAndOffset>, i64)>> {
+        ) -> BoxFuture<'_, Result<FetchResult>> {
             let inner = Arc::clone(&self.inner);
             Box::pin(async move {
                 if let Some(err) = inner.lock().await.next_err.take() {
@@ -491,7 +495,11 @@ mod tests {
 
                 inner.batch_sizes.push(buffer.len());
 
-                Ok((buffer, inner.buffer.len() as i64 - 1))
+                Ok(FetchResult {
+                    records: buffer,
+                    high_watermark: inner.buffer.len() as i64 - 1,
+                    encoded_response_size: 0,
+                })
             })
         }
 
