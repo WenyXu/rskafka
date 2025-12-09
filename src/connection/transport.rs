@@ -16,7 +16,7 @@ mod keepalive;
 mod sasl;
 pub use keepalive::KeepaliveConfig;
 pub use sasl::{Credentials, OauthBearerCredentials, OauthCallback, SaslConfig};
-
+use tracing::{debug, error};
 #[cfg(feature = "transport-tls")]
 pub type TlsConfig = Option<Arc<rustls::ClientConfig>>;
 
@@ -139,6 +139,13 @@ impl Transport {
             }
             let sock_ref = SockRef::from(&tcp_stream);
             sock_ref.set_tcp_keepalive(&keepalive).map_err(Error::IO)?;
+            debug!(
+                "Connected to broker {} with tcp keepalive time: {:?}, interval: {:?}, retries: {:?}",
+                broker,
+                sock_ref.tcp_keepalive_time().ok(),
+                sock_ref.tcp_keepalive_interval().ok(),
+                sock_ref.tcp_keepalive_retries().ok()
+            );
         }
         Self::wrap_tls(tcp_stream, broker, tls_config).await
     }
