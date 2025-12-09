@@ -397,7 +397,16 @@ where
         self.send_message(buf).await?;
         cleanup_on_cancel.message_sent();
 
-        let mut response = rx.await.expect("Who closed this channel?!")?;
+        let resp = match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(resp) => resp,
+            Err(_) => {
+                return Err(RequestError::IO(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Request timed out",
+                )));
+            }
+        };
+        let mut response = resp.expect("Who closed this channel?!")?;
         let body = R::ResponseBody::read_versioned(&mut response.data, body_api_version)?;
 
         // check if we fully consumed the message, otherwise there might be a bug in our protocol code
