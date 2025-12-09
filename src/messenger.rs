@@ -16,6 +16,7 @@ use rsasl::{
     mechname::MechanismNameError,
     prelude::{Mechname, SASLError, SessionError},
 };
+use std::time::Duration;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, WriteHalf},
@@ -130,6 +131,12 @@ pub struct Messenger<RW> {
 
     /// Join handle for the background worker that fetches responses.
     join_handle: JoinHandle<()>,
+
+    /// Timeout for requests.
+    ///
+    /// If set, requests will timeout after the given duration.
+    /// If not set, requests will not timeout.
+    timeout: Option<Duration>,
 }
 
 #[derive(Error, Debug)]
@@ -215,7 +222,12 @@ impl<RW> Messenger<RW>
 where
     RW: AsyncRead + AsyncWrite + Send + 'static,
 {
-    pub fn new(stream: RW, max_message_size: usize, client_id: Arc<str>) -> Self {
+    pub fn new(
+        stream: RW,
+        max_message_size: usize,
+        client_id: Arc<str>,
+        timeout: Option<Duration>,
+    ) -> Self {
         let (stream_read, stream_write) = tokio::io::split(stream);
         let state = Arc::new(Mutex::new(MessengerState::RequestMap(HashMap::default())));
         let state_captured = Arc::clone(&state);
@@ -301,6 +313,7 @@ where
             version_ranges: HashMap::new(),
             state,
             join_handle,
+            timeout,
         }
     }
 
@@ -397,7 +410,17 @@ where
         self.send_message(buf).await?;
         cleanup_on_cancel.message_sent();
 
-        let mut response = rx.await.expect("Who closed this channel?!")?;
+        let mut response = if let Some(timeout) = self.timeout {
+            tokio::time::timeout(timeout, rx).await.map_err(|_| {
+                RequestError::IO(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Request timed out",
+                ))
+            })?
+        } else {
+            rx.await
+        }
+        .expect("Who closed this channel?!")?;
         let body = R::ResponseBody::read_versioned(&mut response.data, body_api_version)?;
 
         // check if we fully consumed the message, otherwise there might be a bug in our protocol code
@@ -808,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_versions_ok() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
 
         // construct response
         let mut msg = vec![];
@@ -845,7 +868,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_versions_ignores_error_code() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
 
         // construct error response
         let mut msg = vec![];
@@ -908,7 +931,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_versions_ignores_read_code() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
 
         // construct error response
         let mut msg = vec![];
@@ -959,7 +982,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_versions_err_flipped_range() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
 
         // construct response
         let mut msg = vec![];
@@ -992,7 +1015,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_versions_ignores_garbage() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
 
         // construct response
         let mut msg = vec![];
@@ -1056,7 +1079,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_versions_err_no_working_version() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
 
         // construct error response
         for (i, v) in ((ApiVersionsRequest::API_VERSION_RANGE.min().0.0)
@@ -1095,7 +1118,7 @@ mod tests {
     #[tokio::test]
     async fn test_poison_hangup() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
         messenger.set_version_ranges(HashMap::from([(
             ApiKey::ListOffsets,
             ListOffsetsRequest::API_VERSION_RANGE,
@@ -1117,7 +1140,7 @@ mod tests {
     #[tokio::test]
     async fn test_poison_negative_message_size() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
         messenger.set_version_ranges(HashMap::from([(
             ApiKey::ListOffsets,
             ListOffsetsRequest::API_VERSION_RANGE,
@@ -1150,7 +1173,7 @@ mod tests {
     #[tokio::test]
     async fn test_broken_msg_header_does_not_poison() {
         let (sim, rx) = MessageSimulator::new();
-        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(rx, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
         messenger.set_version_ranges(HashMap::from([(
             ApiKey::ApiVersions,
             ApiVersionsRequest::API_VERSION_RANGE,
@@ -1195,7 +1218,7 @@ mod tests {
         let (tx_front, rx_middle) = tokio::io::duplex(1);
         let (tx_middle, mut rx_back) = tokio::io::duplex(1);
 
-        let mut messenger = Messenger::new(tx_front, 1_000, Arc::from(DEFAULT_CLIENT_ID));
+        let mut messenger = Messenger::new(tx_front, 1_000, Arc::from(DEFAULT_CLIENT_ID), None);
 
         // create two barriers:
         // - pause: will be passed after 3 bytes were sent by the client
